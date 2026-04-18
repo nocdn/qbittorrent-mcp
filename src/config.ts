@@ -1,8 +1,11 @@
+import type { LogLevel } from "./logger.ts";
+
 export type Env = {
   QBITTORRENT_URL?: string;
   QBITTORRENT_USERNAME?: string;
   QBITTORRENT_PASSWORD?: string;
   QBITTORRENT_REQUEST_TIMEOUT_MS?: string;
+  LOG_LEVEL?: string;
   PORT?: string;
   RATE_LIMIT_WINDOW_MS?: string;
   RATE_LIMIT_MAX?: string;
@@ -20,6 +23,7 @@ export type QBittorrentConfig = {
 export type RuntimeConfig = {
   port: number;
   requestTimeoutMs: number;
+  logLevel: LogLevel;
   mainRateLimit: {
     windowMs: number;
     limit: number;
@@ -32,6 +36,7 @@ export type RuntimeConfig = {
 
 const DEFAULT_PORT = 7100;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_LOG_LEVEL: LogLevel = "info";
 const DEFAULT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const DEFAULT_RATE_LIMIT_MAX = 100;
 const DEFAULT_HEALTH_RATE_LIMIT_WINDOW_MS = 500;
@@ -56,10 +61,24 @@ function parseIntegerEnv(name: string, value: string | undefined, fallback: numb
   return parsed;
 }
 
+function parseLogLevelEnv(value: string | undefined): LogLevel {
+  const trimmed = readEnvString(value);
+  if (!trimmed) {
+    return DEFAULT_LOG_LEVEL;
+  }
+
+  if (trimmed === "debug" || trimmed === "info" || trimmed === "warn" || trimmed === "error") {
+    return trimmed;
+  }
+
+  throw new Error("Invalid environment variable LOG_LEVEL: expected one of debug, info, warn, error");
+}
+
 export function getRuntimeConfig(source: Partial<Env>): RuntimeConfig {
   return {
     port: parseIntegerEnv("PORT", source.PORT, DEFAULT_PORT),
     requestTimeoutMs: parseIntegerEnv("QBITTORRENT_REQUEST_TIMEOUT_MS", source.QBITTORRENT_REQUEST_TIMEOUT_MS, DEFAULT_REQUEST_TIMEOUT_MS),
+    logLevel: parseLogLevelEnv(source.LOG_LEVEL),
     mainRateLimit: {
       windowMs: parseIntegerEnv("RATE_LIMIT_WINDOW_MS", source.RATE_LIMIT_WINDOW_MS, DEFAULT_RATE_LIMIT_WINDOW_MS),
       limit: parseIntegerEnv("RATE_LIMIT_MAX", source.RATE_LIMIT_MAX, DEFAULT_RATE_LIMIT_MAX),

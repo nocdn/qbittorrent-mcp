@@ -1,18 +1,33 @@
+import type { Logger } from "./logger.ts";
+
 export class QBittorrentClient {
   private baseUrl: string;
   private username: string;
   private password: string;
   private requestTimeoutMs: number;
+  private logger: Logger;
   private sid: string | null = null;
 
-  constructor(baseUrl: string, username: string, password: string, requestTimeoutMs = 30_000) {
+  constructor(baseUrl: string, username: string, password: string, requestTimeoutMs = 30_000, logger?: Logger) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.username = username;
     this.password = password;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.logger = logger ?? {
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+      child: () => this.logger,
+    };
   }
 
   async login(): Promise<void> {
+    this.logger.debug("qBittorrent login started", {
+      baseUrl: this.baseUrl,
+      requestTimeoutMs: this.requestTimeoutMs,
+    });
+
     const body = new URLSearchParams({ username: this.username, password: this.password });
     const res = await this.fetchWithTimeout("/api/v2/auth/login", {
       method: "POST",
@@ -31,11 +46,16 @@ export class QBittorrentClient {
       throw new Error(`Login failed: no SID cookie received${details ? ` (${details})` : ""}`);
     }
     this.sid = match[1];
+
+    this.logger.debug("qBittorrent login succeeded", {
+      baseUrl: this.baseUrl,
+    });
   }
 
   async logout(): Promise<void> {
     await this.post("/api/v2/auth/logout");
     this.sid = null;
+    this.logger.debug("qBittorrent session cleared");
   }
 
   async getVersion(): Promise<string> {
@@ -217,6 +237,8 @@ export class QBittorrentClient {
   }
 
   private async request(method: string, path: string, body?: URLSearchParams): Promise<Response> {
+    const startedAt = Date.now();
+
     if (!this.sid) {
       await this.login();
     }
@@ -225,6 +247,10 @@ export class QBittorrentClient {
     let res = await this.fetchWithTimeout(path, { method, headers, body });
 
     if (res.status === 403) {
+      this.logger.warn("qBittorrent request returned 403, retrying after re-authentication", {
+        method,
+        path,
+      });
       await this.login();
       headers.Cookie = `SID=${this.sid}`;
       res = await this.fetchWithTimeout(path, { method, headers, body });
@@ -233,6 +259,13 @@ export class QBittorrentClient {
     if (!res.ok) {
       throw await this.createRequestError(method, path, res);
     }
+
+    this.logger.debug("qBittorrent request succeeded", {
+      method,
+      path,
+      status: res.status,
+      durationMs: Date.now() - startedAt,
+    });
 
     return res;
   }
@@ -258,9 +291,19 @@ export class QBittorrentClient {
       return await fetch(`${this.baseUrl}${path}`, { ...init, signal: controller.signal });
     } catch (error) {
       if (controller.signal.aborted) {
+        this.logger.warn("qBittorrent request timed out", {
+          method: init.method ?? "GET",
+          path,
+          requestTimeoutMs: this.requestTimeoutMs,
+        });
         throw new Error(`qBittorrent request timed out after ${this.requestTimeoutMs}ms: ${init.method ?? "GET"} ${path}`);
       }
 
+      this.logger.warn("qBittorrent request failed before receiving a response", {
+        method: init.method ?? "GET",
+        path,
+        error: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     } finally {
       clearTimeout(timeout);

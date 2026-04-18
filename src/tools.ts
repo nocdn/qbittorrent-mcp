@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Logger } from "./logger.ts";
 import { QBittorrentClient } from "./qbittorrent.ts";
 
 const hashInputSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
@@ -39,6 +40,28 @@ function done(action: string, details: Record<string, unknown> = {}) {
 function fail(e: unknown) {
   const message = e instanceof Error ? e.message : String(e);
   return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+}
+
+function summarizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => summarizeValue(item));
+  }
+
+  if (typeof value === "string") {
+    if (value.length <= 120) {
+      return value;
+    }
+
+    return `${value.slice(0, 117)}...`;
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [key, summarizeValue(entryValue)]),
+    );
+  }
+
+  return value;
 }
 
 function normalizeInfoHash(value: string): string | null {
@@ -265,47 +288,73 @@ async function waitForTorrent(
   );
 }
 
-export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
+async function runTool(
+  logger: Logger,
+  name: string,
+  args: Record<string, unknown> | undefined,
+  handler: () => Promise<ReturnType<typeof ok>>,
+) {
+  const startedAt = Date.now();
+  logger.info("Tool call started", {
+    tool: name,
+    args: summarizeValue(args),
+  });
+
+  try {
+    const result = await handler();
+    logger.info("Tool call succeeded", {
+      tool: name,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn("Tool call failed", {
+      tool: name,
+      durationMs: Date.now() - startedAt,
+      error: message,
+    });
+    return fail(error);
+  }
+}
+
+export function registerTools(mcp: McpServer, client: QBittorrentClient, logger: Logger): void {
   mcp.tool("get_version", "Get qBittorrent application version", async () => {
-    try { return ok(await client.getVersion()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_version", undefined, async () => ok(await client.getVersion()));
   });
 
   mcp.tool("get_api_version", "Get qBittorrent Web API version", async () => {
-    try { return ok(await client.getApiVersion()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_api_version", undefined, async () => ok(await client.getApiVersion()));
   });
 
   mcp.tool("get_preferences", "Get qBittorrent application preferences", async () => {
-    try { return ok(await client.getPreferences()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_preferences", undefined, async () => ok(await client.getPreferences()));
   });
 
   mcp.tool("get_default_save_path", "Get default save path for torrents", async () => {
-    try { return ok(await client.getDefaultSavePath()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_default_save_path", undefined, async () => ok(await client.getDefaultSavePath()));
   });
 
   mcp.tool("get_transfer_info", "Get global transfer info (speeds, connection status)", async () => {
-    try { return ok(await client.getTransferInfo()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_transfer_info", undefined, async () => ok(await client.getTransferInfo()));
   });
 
   mcp.tool("get_speed_limits_mode", "Get current speed limits mode (0=normal, 1=alternative)", async () => {
-    try { return ok(await client.getSpeedLimitsMode()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_speed_limits_mode", undefined, async () => ok(await client.getSpeedLimitsMode()));
   });
 
   mcp.tool("set_global_download_limit", "Set global download speed limit in bytes/second (0 to disable)", { limit: z.number() }, async (args) => {
-    try {
+    return runTool(logger, "set_global_download_limit", args, async () => {
       await client.setDownloadLimit(args.limit);
       return done("set_global_download_limit", { limit: args.limit });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("set_global_upload_limit", "Set global upload speed limit in bytes/second (0 to disable)", { limit: z.number() }, async (args) => {
-    try {
+    return runTool(logger, "set_global_upload_limit", args, async () => {
       await client.setUploadLimit(args.limit);
       return done("set_global_upload_limit", { limit: args.limit });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("list_torrents", "List torrents with optional filters", {
@@ -317,17 +366,13 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
     limit: z.number().optional(),
     offset: z.number().optional(),
   }, async (args) => {
-    try { return ok(await client.getTorrents(args.filter, args.category, args.tag, args.sort, args.reverse, args.limit, args.offset)); } catch (e) { return fail(e); }
+    return runTool(logger, "list_torrents", args, async () => ok(await client.getTorrents(args.filter, args.category, args.tag, args.sort, args.reverse, args.limit, args.offset)));
   });
 
   mcp.tool("get_torrent_status", "Get a compact status snapshot for a specific torrent", {
     hash: z.string(),
   }, async (args) => {
-    try {
-      return ok(await getCompactTorrentStatus(client, args.hash));
-    } catch (e) {
-      return fail(e);
-    }
+    return runTool(logger, "get_torrent_status", args, async () => ok(await getCompactTorrentStatus(client, args.hash)));
   });
 
   mcp.tool("wait_for_torrent", "Wait for a torrent to reach a target state", {
@@ -336,7 +381,7 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
     timeoutMs: z.number().int().positive().optional(),
     pollIntervalMs: z.number().int().positive().optional(),
   }, async (args) => {
-    try {
+    return runTool(logger, "wait_for_torrent", args, async () => {
       const until = args.until ?? "complete";
       const timeoutMs = args.timeoutMs ?? 5 * 60 * 1000;
       const pollIntervalMs = Math.min(args.pollIntervalMs ?? 2_000, timeoutMs);
@@ -347,21 +392,19 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
         elapsedMs: result.elapsedMs,
         torrent: result.torrent,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("get_torrent_properties", "Get properties for a specific torrent", { hash: z.string() }, async (args) => {
-    try { return ok(await client.getTorrentProperties(normalizeHash(args.hash))); } catch (e) { return fail(e); }
+    return runTool(logger, "get_torrent_properties", args, async () => ok(await client.getTorrentProperties(normalizeHash(args.hash))));
   });
 
   mcp.tool("get_torrent_trackers", "Get trackers for a specific torrent", { hash: z.string() }, async (args) => {
-    try { return ok(await client.getTorrentTrackers(normalizeHash(args.hash))); } catch (e) { return fail(e); }
+    return runTool(logger, "get_torrent_trackers", args, async () => ok(await client.getTorrentTrackers(normalizeHash(args.hash))));
   });
 
   mcp.tool("get_torrent_files", "Get files for a specific torrent", { hash: z.string() }, async (args) => {
-    try { return ok(await client.getTorrentFiles(normalizeHash(args.hash))); } catch (e) { return fail(e); }
+    return runTool(logger, "get_torrent_files", args, async () => ok(await client.getTorrentFiles(normalizeHash(args.hash))));
   });
 
   mcp.tool("add_torrent", "Add torrents by URL or magnet link", {
@@ -381,7 +424,7 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
     sequentialDownload: z.boolean().optional(),
     firstLastPiecePrio: z.boolean().optional(),
   }, async (args) => {
-    try {
+    return runTool(logger, "add_torrent", args as Record<string, unknown>, async () => {
       const normalizedUrls = normalizeUrls(args.urls);
       const normalizedTags = args.tags !== undefined ? normalizeTags(args.tags) : undefined;
       const response = await client.addTorrent({
@@ -398,96 +441,82 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
         tags: normalizedTags ?? [],
         qbittorrentResponse: response,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("pause_torrents", "Pause one or more torrents", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
   }, async (args) => {
-    try {
+    return runTool(logger, "pause_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.pauseTorrents(normalized.parameter);
       return done("pause_torrents", toHashScopeResult(normalized));
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("resume_torrents", "Resume one or more torrents", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
   }, async (args) => {
-    try {
+    return runTool(logger, "resume_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.resumeTorrents(normalized.parameter);
       return done("resume_torrents", toHashScopeResult(normalized));
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("delete_torrents", "Delete one or more torrents", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
     deleteFiles: z.boolean().describe("Also delete downloaded files"),
   }, async (args) => {
-    try {
+    return runTool(logger, "delete_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.deleteTorrents(normalized.parameter, args.deleteFiles);
       return done("delete_torrents", {
         ...toHashScopeResult(normalized),
         deleteFiles: args.deleteFiles,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("recheck_torrents", "Recheck one or more torrents", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
   }, async (args) => {
-    try {
+    return runTool(logger, "recheck_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.recheckTorrents(normalized.parameter);
       return done("recheck_torrents", toHashScopeResult(normalized));
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("reannounce_torrents", "Reannounce one or more torrents to trackers", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
   }, async (args) => {
-    try {
+    return runTool(logger, "reannounce_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.reannounceTorrents(normalized.parameter);
       return done("reannounce_torrents", toHashScopeResult(normalized));
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("set_torrent_category", "Set category for one or more torrents", {
     hashes: hashInputSchema,
     category: z.string(),
   }, async (args) => {
-    try {
+    return runTool(logger, "set_torrent_category", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.setTorrentCategory(normalized.parameter, args.category);
       return done("set_torrent_category", {
         ...toHashScopeResult(normalized),
         category: args.category,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("add_torrent_tags", "Add tags to one or more torrents", {
     hashes: hashInputSchema,
     tags: tagsInputSchema.describe("Tags as an array or comma-separated string"),
   }, async (args) => {
-    try {
+    return runTool(logger, "add_torrent_tags", args as Record<string, unknown>, async () => {
       const normalizedHashes = normalizeHashesInput(args.hashes);
       const normalizedTags = normalizeTags(args.tags);
       await client.addTorrentTags(normalizedHashes.parameter, normalizedTags.join(","));
@@ -495,16 +524,14 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
         ...toHashScopeResult(normalizedHashes),
         tags: normalizedTags,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("remove_torrent_tags", "Remove tags from one or more torrents", {
     hashes: hashInputSchema,
     tags: tagsInputSchema.describe("Tags as an array or comma-separated string"),
   }, async (args) => {
-    try {
+    return runTool(logger, "remove_torrent_tags", args as Record<string, unknown>, async () => {
       const normalizedHashes = normalizeHashesInput(args.hashes);
       const normalizedTags = normalizeTags(args.tags);
       await client.removeTorrentTags(normalizedHashes.parameter, normalizedTags.join(","));
@@ -512,64 +539,56 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient): void {
         ...toHashScopeResult(normalizedHashes),
         tags: normalizedTags,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("set_torrent_download_limit", "Set download speed limit for specific torrents (bytes/second, 0 to disable)", {
     hashes: hashInputSchema,
     limit: z.number(),
   }, async (args) => {
-    try {
+    return runTool(logger, "set_torrent_download_limit", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.setTorrentDownloadLimit(normalized.parameter, args.limit);
       return done("set_torrent_download_limit", {
         ...toHashScopeResult(normalized),
         limit: args.limit,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("set_torrent_upload_limit", "Set upload speed limit for specific torrents (bytes/second, 0 to disable)", {
     hashes: hashInputSchema,
     limit: z.number(),
   }, async (args) => {
-    try {
+    return runTool(logger, "set_torrent_upload_limit", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.setTorrentUploadLimit(normalized.parameter, args.limit);
       return done("set_torrent_upload_limit", {
         ...toHashScopeResult(normalized),
         limit: args.limit,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("set_torrent_location", "Move torrents to a different location on disk", {
     hashes: hashInputSchema,
     location: z.string(),
   }, async (args) => {
-    try {
+    return runTool(logger, "set_torrent_location", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
       await client.setTorrentLocation(normalized.parameter, args.location);
       return done("set_torrent_location", {
         ...toHashScopeResult(normalized),
         location: args.location,
       });
-    } catch (e) {
-      return fail(e);
-    }
+    });
   });
 
   mcp.tool("get_categories", "Get all torrent categories", async () => {
-    try { return ok(await client.getCategories()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_categories", undefined, async () => ok(await client.getCategories()));
   });
 
   mcp.tool("get_tags", "Get all torrent tags", async () => {
-    try { return ok(await client.getTags()); } catch (e) { return fail(e); }
+    return runTool(logger, "get_tags", undefined, async () => ok(await client.getTags()));
   });
 }

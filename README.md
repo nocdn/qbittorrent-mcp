@@ -31,6 +31,8 @@ Open http://localhost:7100
 
 On startup, the Bun server performs a qBittorrent connection check using the configured URL and credentials. If the check fails, the process exits before it starts listening for requests.
 
+Structured JSON logs are emitted for startup, MCP session flow, readiness checks, tool execution, and qBittorrent request retries or timeouts. Adjust verbosity with `LOG_LEVEL`.
+
 ### Cloudflare Workers
 
 Create a `.dev.vars` file with the same qBittorrent variables, then:
@@ -265,6 +267,7 @@ All variables are optional except the qBittorrent connection settings.
 | `QBITTORRENT_USERNAME` | qBittorrent WebUI username | *(required)* |
 | `QBITTORRENT_PASSWORD` | qBittorrent WebUI password | *(required)* |
 | `QBITTORRENT_REQUEST_TIMEOUT_MS` | Timeout for each qBittorrent Web API request | `30000` |
+| `LOG_LEVEL` | Application log level (`debug`, `info`, `warn`, `error`) | `info` |
 | `PORT` | Port the API listens on (Bun only) | `7100` |
 | `RATE_LIMIT_WINDOW_MS` | Main rate limit window (ms) | `900000` (15 min) |
 | `RATE_LIMIT_MAX` | Max requests per main window | `100` |
@@ -284,3 +287,9 @@ Two separate limiters are configured:
 
 - `GET /api/health` is a liveness check for the MCP process itself.
 - `GET /api/ready` is a readiness check that logs into qBittorrent and verifies the Web API version endpoint is reachable.
+
+## Logging
+
+- Request logging uses Hono's built-in logger middleware.
+- Additional structured JSON logs cover startup, MCP transport/session behavior, readiness checks, tool calls, and qBittorrent retries/timeouts.
+- `LOG_LEVEL=debug` is useful when diagnosing agent behavior or upstream qBittorrent connectivity issues.

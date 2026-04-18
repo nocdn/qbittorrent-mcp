@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { MemoryEventStore, StreamableHTTPTransport } from "@hono/mcp";
 import { Env, getQBittorrentConfig, getRuntimeConfig } from "./config.ts";
+import { createLogger, type LogLevel, type Logger } from "./logger.ts";
 import { QBittorrentClient } from "./qbittorrent.ts";
 import { registerTools } from "./tools.ts";
 
@@ -40,38 +41,51 @@ function getCachedLimiter(scope: string, windowMs: number, limit: number) {
   return limiter;
 }
 
-function createQBittorrentClient(e: Partial<Env>) {
+function createAppLogger(logLevel: LogLevel): Logger {
+  return createLogger("qbittorrent-mcp", logLevel);
+}
+
+function createQBittorrentClient(e: Partial<Env>, logger: Logger) {
   const qbittorrent = getQBittorrentConfig(e);
   return new QBittorrentClient(
     qbittorrent.url,
     qbittorrent.username,
     qbittorrent.password,
     qbittorrent.requestTimeoutMs,
+    logger.child("qbittorrent"),
   );
 }
 
-function createMcpServer(client: QBittorrentClient) {
+function createMcpServer(client: QBittorrentClient, logger: Logger) {
   const mcp = new McpServer(
     { name: "qbittorrent-mcp", version: "1.0.0" },
     { instructions: mcpServerInstructions },
   );
-  registerTools(mcp, client);
+  registerTools(mcp, client, logger.child("mcp.tool"));
   return mcp;
 }
 
-function createSessionTransport() {
+function createSessionTransport(logger: Logger) {
   const eventStore = new MemoryEventStore();
   const transport = new StreamableHTTPTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     eventStore,
     onsessioninitialized: (sessionId) => {
       mcpTransports.set(sessionId, transport);
+      logger.info("MCP session initialized", {
+        sessionId,
+        activeSessions: mcpTransports.size,
+      });
     },
   });
 
   transport.onclose = () => {
     if (transport.sessionId) {
       mcpTransports.delete(transport.sessionId);
+      logger.info("MCP session closed", {
+        sessionId: transport.sessionId,
+        activeSessions: mcpTransports.size,
+      });
     }
   };
 
@@ -118,9 +132,14 @@ app.get("/api/health", async (c, next) => {
 });
 
 app.get("/api/ready", async (c) => {
+  const runtimeConfig = getRuntimeConfig(env(c) as Env);
+  const logger = createAppLogger(runtimeConfig.logLevel).child("ready");
+
   try {
-    const client = createQBittorrentClient(env(c) as Env);
+    const client = createQBittorrentClient(env(c) as Env, logger);
     const { version, apiVersion } = await client.validateConnection();
+
+    logger.info("Readiness check succeeded", { version, apiVersion });
 
     return c.json({
       status: "ready",
@@ -132,6 +151,7 @@ app.get("/api/ready", async (c) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logger.warn("Readiness check failed", { error: message });
     return c.json({
       status: "not_ready",
       error: message,
@@ -147,39 +167,57 @@ app.get("/api", (c) => {
 });
 
 app.all("/api/mcp", async (c) => {
+  const runtimeConfig = getRuntimeConfig(env(c) as Env);
+  const logger = createAppLogger(runtimeConfig.logLevel).child("mcp");
+
   try {
-    const client = createQBittorrentClient(env(c) as Env);
+    const client = createQBittorrentClient(env(c) as Env, logger);
     const parsedBody = await getParsedBody(c);
     const sessionId = c.req.header("mcp-session-id");
 
     if (supportsStatefulMcpSessions && sessionId) {
       const transport = mcpTransports.get(sessionId);
       if (!transport) {
+        logger.warn("Received MCP request for missing session", { sessionId });
         return jsonRpcError("Session not found", 404, -32001);
       }
 
+      logger.debug("Reusing MCP session transport", { sessionId });
       return transport.handleRequest(c, parsedBody);
     }
 
     if (supportsStatefulMcpSessions && c.req.method === "POST" && parsedBody !== undefined && isInitializeRequest(parsedBody)) {
-      const transport = createSessionTransport();
-      const mcp = createMcpServer(client);
+      logger.info("Creating stateful MCP session transport");
+      const transport = createSessionTransport(logger);
+      const mcp = createMcpServer(client, logger);
       await mcp.connect(transport);
       return transport.handleRequest(c, parsedBody);
     }
 
     if (supportsStatefulMcpSessions && c.req.method !== "POST") {
+      logger.warn("Rejected stateful MCP request without a valid session", {
+        method: c.req.method,
+      });
       return jsonRpcError("Bad Request: No valid session ID provided", 400);
     }
 
     // Stateless mode keeps manual curl testing ergonomic and is safe for Workers,
     // where in-memory session affinity across requests is not guaranteed.
+    logger.debug("Using stateless MCP transport", {
+      runtime: supportsStatefulMcpSessions ? "bun-fallback" : "workerd",
+      method: c.req.method,
+    });
     const transport = new StreamableHTTPTransport();
-    const mcp = createMcpServer(client);
+    const mcp = createMcpServer(client, logger);
     await mcp.connect(transport);
     return transport.handleRequest(c, parsedBody);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logger.error("MCP request handling failed", {
+      error: message,
+      method: c.req.method,
+      path: c.req.path,
+    });
     return jsonRpcError(message, 500, -32603);
   }
 });

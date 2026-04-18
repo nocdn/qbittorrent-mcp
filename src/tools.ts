@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Logger } from "./logger.ts";
-import { QBittorrentClient } from "./qbittorrent.ts";
+import { QBittorrentClient, QBittorrentLoginError, QBittorrentRequestError } from "./qbittorrent.ts";
 
 const hashInputSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
 const tagsInputSchema = z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]);
@@ -37,9 +37,85 @@ function done(action: string, details: Record<string, unknown> = {}) {
   });
 }
 
+function recoveryHintsForError(e: unknown): string[] {
+  const hints: string[] = [];
+
+  if (e instanceof QBittorrentLoginError) {
+    hints.push("Confirm QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD match the qBittorrent Web UI (wrong password often yields no SID; body may be \"Fails.\").");
+    hints.push("Confirm QBITTORRENT_URL is the same origin you open in a browser for the Web UI (correct scheme, host, port, and path prefix if you use one).");
+    return hints;
+  }
+
+  if (e instanceof QBittorrentRequestError) {
+    if (e.path.includes("/api/v2/auth/login")) {
+      hints.push("Login HTTP failed: check credentials, Web UI enabled, and whether qBittorrent rejects this client (e.g. IP whitelist / reverse proxy headers).");
+    }
+    if (e.httpStatus === 401 || e.httpStatus === 403) {
+      hints.push("HTTP 401/403: wrong credentials, forbidden Web API access, or an expired/invalid session; if qBittorrent restarted, retry after the server is up.");
+    }
+    if (e.httpStatus === 404) {
+      hints.push("HTTP 404: QBITTORRENT_URL may not point at the Web UI, or a reverse proxy is stripping /api paths.");
+    }
+    if (e.httpStatus >= 500) {
+      hints.push("qBittorrent returned a 5xx error; inspect qBittorrent logs and disk/database health on the host.");
+    }
+    hints.push(`Failed request summary: ${e.method} ${e.path} → HTTP ${e.httpStatus} ${e.httpStatusText}.`);
+    return hints;
+  }
+
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/timed out|timeout/i.test(msg)) {
+    hints.push("Try raising QBITTORRENT_REQUEST_TIMEOUT_MS if the Web UI is slow or the network is latent.");
+    hints.push("From the same environment as this MCP server, verify the Web UI responds (e.g. curl the base URL).");
+  }
+  if (/Cannot reach qBittorrent|ECONNREFUSED|ENOTFOUND|getaddrinfo|certificate|TLS|SSL|fetch failed/i.test(msg)) {
+    hints.push("Network/TLS issue: confirm QBITTORRENT_URL, DNS, firewall, and that the container can reach the host running qBittorrent.");
+  }
+  if (/credential|password|login|SID|Fails\.|Unauthorized|Forbidden|401|403/i.test(msg)) {
+    hints.push("If this looks authentication-related, re-check QBITTORRENT_USERNAME and QBITTORRENT_PASSWORD and any qBittorrent Web UI access restrictions.");
+  }
+
+  return hints;
+}
+
+function qbittorrentErrorPayload(e: unknown): Record<string, unknown> | undefined {
+  if (e instanceof QBittorrentRequestError) {
+    return {
+      type: e.name,
+      method: e.method,
+      path: e.path,
+      httpStatus: e.httpStatus,
+      httpStatusText: e.httpStatusText,
+      responseBodySnippet: e.responseBodySnippet || undefined,
+    };
+  }
+  if (e instanceof QBittorrentLoginError) {
+    return {
+      type: e.name,
+      responseBodySnippet: e.responseBody.trim().slice(0, 500) || undefined,
+    };
+  }
+  return undefined;
+}
+
 function fail(e: unknown) {
   const message = e instanceof Error ? e.message : String(e);
-  return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
+  const recoveryHints = recoveryHintsForError(e);
+  const qbittorrent = qbittorrentErrorPayload(e);
+
+  const payload: Record<string, unknown> = {
+    status: "error",
+    message,
+    recoveryHints,
+  };
+  if (qbittorrent) {
+    payload.qbittorrent = qbittorrent;
+  }
+
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+    isError: true,
+  };
 }
 
 function summarizeValue(value: unknown): unknown {

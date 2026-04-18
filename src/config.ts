@@ -6,6 +6,8 @@ export type Env = {
   QBITTORRENT_PASSWORD?: string;
   QBITTORRENT_REQUEST_TIMEOUT_MS?: string;
   LOG_LEVEL?: string;
+  LOG_FORMAT?: string;
+  LOG_ACCESS_LOG_PROBES?: string;
   PORT?: string;
   RATE_LIMIT_WINDOW_MS?: string;
   RATE_LIMIT_MAX?: string;

@@ -1,5 +1,40 @@
 import type { Logger } from "./logger.ts";
 
+/** Thrown when the Web API returns a non-success HTTP status (includes response body snippet). */
+export class QBittorrentRequestError extends Error {
+  override readonly name = "QBittorrentRequestError";
+  readonly method: string;
+  readonly path: string;
+  readonly httpStatus: number;
+  readonly httpStatusText: string;
+  readonly responseBodySnippet: string;
+
+  constructor(method: string, path: string, res: Response, responseBody: string) {
+    const snippet = responseBody.trim().slice(0, 500);
+    const extra = snippet ? ` - ${snippet}` : "";
+    super(`qBittorrent request failed: ${method} ${path} returned ${res.status} ${res.statusText}${extra}`);
+    this.method = method;
+    this.path = path;
+    this.httpStatus = res.status;
+    this.httpStatusText = res.statusText;
+    this.responseBodySnippet = snippet;
+  }
+}
+
+/** Thrown when login succeeds at HTTP level but no SID cookie is returned (often wrong password → body "Fails."). */
+export class QBittorrentLoginError extends Error {
+  override readonly name = "QBittorrentLoginError";
+
+  constructor(public readonly responseBody: string) {
+    const body = responseBody.trim().slice(0, 500);
+    super(
+      body
+        ? `qBittorrent login failed: no SID cookie received. Web UI credentials may be wrong or the login response was unexpected. Response snippet: ${body}`
+        : "qBittorrent login failed: no SID cookie received (empty response). Check QBITTORRENT_URL and that the Web UI is enabled.",
+    );
+  }
+}
+
 export class QBittorrentClient {
   private baseUrl: string;
   private username: string;
@@ -43,7 +78,7 @@ export class QBittorrentClient {
     const match = setCookie?.match(/SID=([^;]+)/);
     if (!match) {
       const details = (await res.text()).trim();
-      throw new Error(`Login failed: no SID cookie received${details ? ` (${details})` : ""}`);
+      throw new QBittorrentLoginError(details);
     }
     this.sid = match[1];
 
@@ -296,7 +331,10 @@ export class QBittorrentClient {
           path,
           requestTimeoutMs: this.requestTimeoutMs,
         });
-        throw new Error(`qBittorrent request timed out after ${this.requestTimeoutMs}ms: ${init.method ?? "GET"} ${path}`);
+        throw new Error(
+          `qBittorrent request timed out after ${this.requestTimeoutMs}ms: ${init.method ?? "GET"} ${path}. ` +
+            "Increase QBITTORRENT_REQUEST_TIMEOUT_MS if the Web UI is slow or the link is high-latency.",
+        );
       }
 
       this.logger.warn("qBittorrent request failed before receiving a response", {
@@ -304,15 +342,30 @@ export class QBittorrentClient {
         path,
         error: error instanceof Error ? error.message : String(error),
       });
-      throw error;
+      const underlying = error instanceof Error ? error.message : String(error);
+      const cause =
+        error instanceof Error && error.cause != null
+          ? error.cause instanceof Error
+            ? error.cause.message
+            : String(error.cause)
+          : undefined;
+      throw new Error(
+        [
+          `Cannot reach qBittorrent at ${this.baseUrl}${path} (${init.method ?? "GET"}).`,
+          `Underlying error: ${underlying}`,
+          cause ? `Cause: ${cause}` : null,
+          "Verify QBITTORRENT_URL (scheme, host, port), DNS, TLS, and that the Web UI is reachable from this container/process.",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  private async createRequestError(method: string, path: string, res: Response): Promise<Error> {
-    const rawDetails = (await res.text()).trim();
-    const details = rawDetails ? ` - ${rawDetails.slice(0, 200)}` : "";
-    return new Error(`qBittorrent request failed: ${method} ${path} returned ${res.status} ${res.statusText}${details}`);
+  private async createRequestError(method: string, path: string, res: Response): Promise<QBittorrentRequestError> {
+    const raw = await res.text();
+    return new QBittorrentRequestError(method, path, res, raw);
   }
 }

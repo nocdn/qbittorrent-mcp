@@ -53,7 +53,7 @@ docker compose up --build
 
 The container validates the qBittorrent connection during startup. Invalid connection details cause the process to exit with a startup error instead of serving the MCP endpoint with a broken backend connection.
 
-`compose.yaml` also defines a Docker healthcheck against `/api/ready`, so the container health reflects whether the MCP service can still authenticate to qBittorrent.
+`compose.yaml` also defines a Docker healthcheck against `/api/ready` (every **10 minutes** by default), so the container health reflects whether the MCP service can still authenticate to qBittorrent without polling the Web API every minute.
 
 ### Cloudflare Workers
 
@@ -100,6 +100,17 @@ Add to your MCP client config (e.g. Claude Desktop, Cursor, etc.):
 For Workers, replace the URL with your `*.workers.dev` or custom domain.
 
 For quick manual testing, one-off stateless `curl` calls to `tools/call` are still supported even without running the full MCP initialize flow.
+
+### Errors and agent-facing detail
+
+Per the [MCP tools specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), tool execution failures are returned as a normal tool result with **`isError: true`** so the model can read the payload and recover (as opposed to only a transport-level failure).
+
+For this server:
+
+- **Tool calls** (`tools/call`): failures return JSON text with `status: "error"`, a **`message`**, **`recoveryHints`** (concrete next steps), and optional **`qbittorrent`** fields (`httpStatus`, `path`, `responseBodySnippet`, etc.) when the failure came from the Web API.
+- **Protocol / transport JSON-RPC errors** (e.g. unknown session, bad request): responses use the JSON-RPC **`error`** object; when applicable, **`error.data`** includes `recoveryHints` and identifiers such as `sessionId`.
+
+Server `instructions` (MCP initialize) also mention that tool errors include structured detail for agents.
 
 ### MCP discovery with `curl`
 
@@ -270,6 +281,8 @@ All variables are optional except the qBittorrent connection settings.
 | `QBITTORRENT_PASSWORD` | qBittorrent WebUI password | *(required)* |
 | `QBITTORRENT_REQUEST_TIMEOUT_MS` | Timeout for each qBittorrent Web API request | `30000` |
 | `LOG_LEVEL` | Application log level (`debug`, `info`, `warn`, `error`) | `info` |
+| `LOG_FORMAT` | Log layout: `pretty` / `human` (default; readable lines, indented meta, nicer HTTP access lines) or `json` (one JSON object per line for aggregators) | `pretty` (when unset) |
+| `LOG_ACCESS_LOG_PROBES` | When `true` / `1` / `yes`, include `/api/health` and `/api/ready` in HTTP access logs; default hides them to reduce probe noise | *(omit; probes hidden)* |
 | `PORT` | Port the API listens on (Bun only) | `7100` |
 | `RATE_LIMIT_WINDOW_MS` | Main rate limit window (ms) | `900000` (15 min) |
 | `RATE_LIMIT_MAX` | Max requests per main window | `100` |
@@ -289,9 +302,12 @@ Two separate limiters are configured:
 
 - `GET /api/health` is a liveness check for the MCP process itself.
 - `GET /api/ready` is a readiness check that logs into qBittorrent and verifies the Web API version endpoint is reachable.
+- Docker Compose runs a **`healthcheck`** against `/api/ready` every **10 minutes** (see `compose.yaml`); adjust `interval` there if you want a different cadence.
 
 ## Logging
 
 - Request logging uses Hono's built-in logger middleware.
 - Additional structured JSON logs cover startup, MCP transport/session behavior, readiness checks, tool calls, and qBittorrent retries/timeouts.
 - `LOG_LEVEL=debug` is useful when diagnosing agent behavior or upstream qBittorrent connectivity issues.
+- **`LOG_FORMAT`** defaults to **pretty** (omit the variable or set `pretty` / `human`). Use **`LOG_FORMAT=json`** when shipping logs to aggregators that expect one JSON object per line. Pretty mode uses an ISO prefix and `→` / `←` on HTTP lines instead of `<--` / `-->`. In Docker without a TTY, colors are usually off; set `FORCE_COLOR=1` if you want ANSI colors in captured logs.
+- **`/api/health`** and **`/api/ready`** are omitted from the HTTP access log by default so Docker or orchestrator probes do not interleave with MCP traffic. Successful readiness is logged at **`debug`** only (`LOG_LEVEL=debug` to see it); failures stay at **`warn`**. Set **`LOG_ACCESS_LOG_PROBES=true`** to print probe requests in the access log again.

@@ -236,7 +236,7 @@ src/
 | `add_torrent` | Add torrents by URL or magnet link with optional placement and per-torrent settings, and return extracted magnet info hashes when available |
 | `pause_torrents` | Pause one or more torrents |
 | `resume_torrents` | Resume one or more torrents |
-| `delete_torrents` | Delete one or more torrents (optionally with files) |
+| `delete_torrents` | Delete one or more torrents; downloaded files are deleted by default unless `deleteFiles=false` |
 | `recheck_torrents` | Recheck one or more torrents |
 | `reannounce_torrents` | Reannounce one or more torrents to trackers |
 | `set_torrent_category` | Set category for torrents |
@@ -247,6 +247,8 @@ src/
 | `set_torrent_location` | Move torrents to a different disk location |
 | `get_categories` | Get all torrent categories |
 | `get_tags` | Get all torrent tags |
+
+`delete_torrents` defaults `deleteFiles` to `true`. Agents must explicitly pass `deleteFiles=false` if they want to remove the torrent from qBittorrent but keep the downloaded files on disk.
 
 ## Routes
 

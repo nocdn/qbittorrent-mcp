@@ -464,16 +464,17 @@ export function registerTools(mcp: McpServer, client: QBittorrentClient, logger:
     });
   });
 
-  mcp.tool("delete_torrents", "Delete one or more torrents", {
+  mcp.tool("delete_torrents", "Delete one or more torrents; deletes downloaded files by default unless deleteFiles=false", {
     hashes: hashInputSchema.describe("Hashes as an array, a pipe-separated string, or 'all'"),
-    deleteFiles: z.boolean().describe("Also delete downloaded files"),
+    deleteFiles: z.boolean().optional().default(true).describe("Whether to also delete downloaded files. Defaults to true; set to false to keep files on disk."),
   }, async (args) => {
     return runTool(logger, "delete_torrents", args as Record<string, unknown>, async () => {
       const normalized = normalizeHashesInput(args.hashes);
-      await client.deleteTorrents(normalized.parameter, args.deleteFiles);
+      const deleteFiles = args.deleteFiles ?? true;
+      await client.deleteTorrents(normalized.parameter, deleteFiles);
       return done("delete_torrents", {
         ...toHashScopeResult(normalized),
-        deleteFiles: args.deleteFiles,
+        deleteFiles,
       });
     });
   });

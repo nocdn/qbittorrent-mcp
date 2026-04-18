@@ -3,6 +3,9 @@ node_modules
 !.env.example
 .git
 .gitignore
+wrangler.toml
+.wrangler
+.dev.vars
 .firecrawl
 Dockerfile
 compose.yaml

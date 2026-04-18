@@ -1,20 +1,20 @@
 # syntax=docker/dockerfile:1
 
-FROM oven/bun:1-alpine AS deps
+FROM oven/bun:1-alpine AS build
 WORKDIR /usr/src/app
 
 COPY . ./
-RUN if [ -f bun.lock ]; then bun install --frozen-lockfile --production; else bun install --production; fi
+RUN if [ -f bun.lock ]; then bun install --frozen-lockfile; else bun install; fi
+RUN bun build --compile --minify src/index.ts --outfile qbittorrent-mcp
 
-FROM oven/bun:1-alpine AS release
-WORKDIR /usr/src/app
+FROM alpine:3 AS release
 
-ENV NODE_ENV=production
+RUN apk add --no-cache libstdc++ libgcc \
+ && addgroup -S app && adduser -S app -G app
 
-COPY --from=deps /usr/src/app/node_modules ./node_modules
-COPY . ./
+COPY --from=build /usr/src/app/qbittorrent-mcp /usr/local/bin/qbittorrent-mcp
 
-USER bun
+USER app
 EXPOSE 7100
 
-CMD ["bun", "run", "src/index.ts"]
+CMD ["qbittorrent-mcp"]

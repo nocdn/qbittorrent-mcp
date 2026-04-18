@@ -1,6 +1,11 @@
 {
   "compilerOptions": {
+    "allowImportingTsExtensions": true,
     "strict": true,
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "types": ["bun"],
     "jsx": "react-jsx",
     "jsxImportSource": "hono/jsx"
   }

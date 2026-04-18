@@ -25,6 +25,7 @@ dist-ssr
 # misc
 *.local
 .DS_Store
+.firecrawl/
 *.pem
 *.suo
 *.ntvs*

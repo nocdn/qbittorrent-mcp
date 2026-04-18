@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qbittorrent-mcp:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-7100}
+    ports:
+      - "${PORT:-7100}:${PORT:-7100}"
+    restart: always

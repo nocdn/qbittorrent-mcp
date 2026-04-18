@@ -1,0 +1,15 @@
+{
+  "name": "qbittorrent-mcp",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --hot src/index.ts",
+    "start": "bun run src/index.ts"
+  },
+  "dependencies": {
+    "hono": "latest",
+    "hono-rate-limiter": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}
